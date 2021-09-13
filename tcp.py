@@ -37,7 +37,6 @@ class Servidor:
         if (flags & FLAGS_SYN) == FLAGS_SYN:
             # A flag SYN estar setada significa que é um cliente tentando estabelecer uma conexão nova
             # TODO: talvez você precise passar mais coisas para o construtor de conexão
-            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no)
             # TODO: você precisa fazer o handshake aceitando a conexão. Escolha se você acha melhor
             # fazer aqui mesmo ou dentro da classe Conexao.
             seqnorand=int.from_bytes(urandom(4), byteorder)
@@ -45,6 +44,7 @@ class Servidor:
             segmentohandshake = make_header(dst_port, src_port, seqnorand, ack_no, FLAGS_SYN | FLAGS_ACK)
             segmentohandshake = fix_checksum(segmentohandshake, dst_addr, src_addr)
             self.rede.enviar(segmentohandshake, src_addr)
+            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seqnorand, seq_no + 1)
             if self.callback:
                 self.callback(conexao)
         elif id_conexao in self.conexoes:
@@ -56,11 +56,12 @@ class Servidor:
 
 
 class Conexao:
-    def __init__(self, servidor, id_conexao, sequencia):
+    def __init__(self, servidor, id_conexao, sequencianova, sequenciaanterior):
         self.servidor = servidor
         self.id_conexao = id_conexao
         self.callback = None
-        self.sequencia = sequencia
+        self.sequencianova = sequencianova + 1
+        self.sequenciaanterior = sequenciaanterior
         self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
 
@@ -72,6 +73,12 @@ class Conexao:
         # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
         # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
         # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
+        if (seq_no == self.sequenciaanterior and payload):
+            self.sequenciaanterior = seq_no + len(payload)
+            self.callback(self, payload)
+            segmentoconfirma = make_header(self.id_conexao[3], self.id_conexao[1], self.sequencianova, self.sequenciaanterior, FLAGS_ACK)
+            segmentoconfirma = fix_checksum(segmentoconfirma, self.id_conexao[0], self.id_conexao[2])
+            self.servidor.rede.enviar(segmentoconfirma, self.id_conexao[0])
         print('recebido payload: %r' % payload)
 
     # Os métodos abaixo fazem parte da API
@@ -90,7 +97,19 @@ class Conexao:
         # TODO: implemente aqui o envio de dados.
         # Chame self.servidor.rede.enviar(segmento, dest_addr) para enviar o segmento
         # que você construir para a camada de rede.
-        pass
+        if (len(dados) / MSS <= 1):
+            segsender = make_header(self.id_conexao[3], self.id_conexao[1], self.sequencianova, self.sequenciaanterior, FLAGS_ACK)
+            segsender = fix_checksum(segsender + dados, self.id_conexao[0], self.id_conexao[2])
+            self.servidor.rede.enviar(segsender, self.id_conexao[2])
+        else:
+            tam = len(dados) // MSS
+            for i in range(tam):
+                payload = dados[:MSS]
+                self.sequencianova = self.sequencianova + len(payload)
+                segsender = make_header(self.id_conexao[3], self.id_conexao[1], self.sequencianova, self.sequenciaanterior, FLAGS_ACK)
+                segsender = fix_checksum(segsender + payload, self.id_conexao[0], self.id_conexao[2])
+                self.servidor.rede.enviar(segsender, self.id_conexao[2])
+                dados = dados[MSS:]
 
     def fechar(self):
         """
