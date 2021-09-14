@@ -1,6 +1,4 @@
 import asyncio
-from tcputils import fix_checksum
-from tcputils import FLAGS_ACK, FLAGS_SYN, make_header
 from os import urandom
 from sys import byteorder
 from tcputils import *
@@ -44,7 +42,7 @@ class Servidor:
             segmentohandshake = make_header(dst_port, src_port, seqnorand, ack_no, FLAGS_SYN | FLAGS_ACK)
             segmentohandshake = fix_checksum(segmentohandshake, dst_addr, src_addr)
             self.rede.enviar(segmentohandshake, src_addr)
-            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seqnorand, seq_no + 1)
+            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seqnorand, ack_no)
             if self.callback:
                 self.callback(conexao)
         elif id_conexao in self.conexoes:
@@ -62,6 +60,8 @@ class Conexao:
         self.callback = None
         self.sequencianova = sequencianova + 1
         self.sequenciaanterior = sequenciaanterior
+        self.conexaoaberta = True
+        self.timerligado = True
         self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)  # um timer pode ser criado assim; esta linha é só um exemplo e pode ser removida
         #self.timer.cancel()   # é possível cancelar o timer chamando esse método; esta linha é só um exemplo e pode ser removida
 
@@ -73,16 +73,28 @@ class Conexao:
         # TODO: trate aqui o recebimento de segmentos provenientes da camada de rede.
         # Chame self.callback(self, dados) para passar dados para a camada de aplicação após
         # garantir que eles não sejam duplicados e que tenham sido recebidos em ordem.
-        if (seq_no == self.sequenciaanterior and payload):
-            self.sequenciaanterior = seq_no + len(payload)
-            self.callback(self, payload)
-            segmentoconfirma = make_header(self.id_conexao[3], self.id_conexao[1], self.sequencianova, self.sequenciaanterior, FLAGS_ACK)
-            segmentoconfirma = fix_checksum(segmentoconfirma, self.id_conexao[0], self.id_conexao[2])
-            self.servidor.rede.enviar(segmentoconfirma, self.id_conexao[0])
-        print('recebido payload: %r' % payload)
+        if (self.conexaoaberta):
+
+            if (seq_no == self.sequenciaanterior and payload):
+                self.sequenciaanterior = seq_no + len(payload)
+                self.callback(self, payload)
+                segmentoconfirma = make_header(self.id_conexao[3], self.id_conexao[1], self.sequencianova, self.sequenciaanterior, FLAGS_ACK)
+                segmentoconfirma = fix_checksum(segmentoconfirma, self.id_conexao[0], self.id_conexao[2])
+                self.servidor.rede.enviar(segmentoconfirma, self.id_conexao[0])
+                self.timer.cancel()
+
+            #print('recebido payload: %r' % payload)
+
+            if (flags & FLAGS_FIN) == FLAGS_FIN:
+                self.callback(self, b'')
+                self.sequenciaanterior = self.sequenciaanterior + 1
+                finack = make_header(self.id_conexao[3], self.id_conexao[1], self.sequencianova, self.sequenciaanterior, FLAGS_ACK)
+                finack = fix_checksum(finack, self.id_conexao[0], self.id_conexao[2]) 
+                self.servidor.rede.enviar(finack, self.id_conexao[0])
+                self.conexaoaberta = False
 
     # Os métodos abaixo fazem parte da API
-
+    
     def registrar_recebedor(self, callback):
         """
         Usado pela camada de aplicação para registrar uma função para ser chamada
@@ -116,4 +128,6 @@ class Conexao:
         Usado pela camada de aplicação para fechar a conexão
         """
         # TODO: implemente aqui o fechamento de conexão
-        pass
+        finseg = make_header(self.id_conexao[3], self.id_conexao[1], self.sequencianova, self.sequenciaanterior, FLAGS_ACK | FLAGS_FIN)
+        finseg = fix_checksum(finseg, self.id_conexao[0], self.id_conexao[2])
+        self.servidor.rede.enviar(finseg, self.id_conexao[2])
